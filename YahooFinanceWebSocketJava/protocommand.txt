@@ -1,0 +1,1 @@
+protoc --java_out=YahooFinanceApp/src/main/java ticker.proto 
