@@ -1,12 +1,16 @@
+import yfinance as yf
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, lit
-from pyspark.sql.types import StringType, StructType, StructField, DoubleType, LongType
-from pyspark.sql.streaming.state import GroupState
+from pyspark.sql.functions import from_json, col, lit, udf
+from pyspark.sql.types import StringType, DoubleType, LongType, StructType, StructField
+from pyspark.sql import functions as F
 
 # 1. Create a Spark session
 spark = SparkSession.builder \
-    .appName("IncrementalAverage") \
+    .appName("LiveStreamAnalyticsWithStockNames") \
     .getOrCreate()
+
+# Suppress INFO logs
+spark.sparkContext.setLogLevel("WARN")
 
 # 2. Kafka Configuration
 kafka_brokers = "localhost:9092"
@@ -21,60 +25,71 @@ raw_df = spark.readStream \
     .load()
 
 # 4. Decode and parse Kafka messages
-df = raw_df.selectExpr("CAST(value AS STRING)")
+df = raw_df.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
 
 schema = StructType([
-    StructField("id", StringType(), True),
+    StructField("time", LongType(), True),
     StructField("price", DoubleType(), True),
-    StructField("time", LongType(), True)
+    StructField("change", DoubleType(), True),
+    StructField("changePercentage", DoubleType(), True),
+    StructField("dayVolume", LongType(), True)
 ])
 
-parsed_df = df.select(from_json(col("value"), schema).alias("data")).select("data.*")
+parsed_df = df.select(
+    col("key").alias("stock_key"),  # Include the key as a column
+    from_json(col("value"), schema).alias("data")
+).select("stock_key", "data.*")
 
-# Convert timestamp
+# Convert timestamp for better readability
 parsed_df = parsed_df.withColumn("event_time", (col("time") / 1000).cast("timestamp"))
 
-# 5. Define State Schema
-class StockState:
-    def __init__(self, count=0, sum_price=0.0):
-        self.count = count
-        self.sum_price = sum_price
+# 5. Fetch Stock Name Dynamically from Yahoo Finance (one-time fetch for each unique stock)
+def get_stock_name(ticker):
+    stock = yf.Ticker(ticker)
+    return stock.info.get('longName', ticker)
 
-    def update(self, new_price):
-        self.count += 1
-        self.sum_price += new_price
+# 6. Create UDF for Stock Name Fetching
+get_stock_name_udf = udf(get_stock_name, StringType())
 
-    def get_average(self):
-        return self.sum_price / self.count if self.count > 0 else 0.0
+# 7. Apply the UDF to add stock names to the DataFrame
+stock_name_df = parsed_df.withColumn("stock_name", get_stock_name_udf(col("stock_key")))
 
-# 6. Define Stateful Update Function
-def update_state(stock_id, updates, state: GroupState):
-    # Retrieve or initialize state
-    current_state = state.get(StockState()) if state.exists else StockState()
-    
-    # Update state with new data
-    for row in updates:
-        current_state.update(row.price)
+# 8. Perform Live Analytics
 
-    # Save updated state
-    state.update(current_state)
-
-    # Return the updated average
-    return (stock_id, current_state.get_average(), current_state.count)
-
-# 7. Apply Stateful Aggregation
-from pyspark.sql.functions import expr
-
-stateful_df = parsed_df.groupBy("id").applyInPandasWithState(
-    update_state,
-    stateSchema=StockState,
-    outputMode="append"
+# a. Real-Time Average Price per Stock
+price_df = stock_name_df.groupBy("stock_name").agg(
+    F.avg("price").alias("avg_price"),
+    F.min("price").alias("min_price"),
+    F.max("price").alias("max_price"),
+    F.last("price").alias("current_price")  # Fetches the most recent price for each stock
+)
+# b. Detect Significant Price Changes
+significant_change_df = stock_name_df.filter(col("change") > 1.0).select(
+    "stock_name", "price", "change", "changePercentage", "event_time"
 )
 
-# 8. Write Results
-query = stateful_df.writeStream \
-    .outputMode("update") \
+# c. Calculate Total Daily Volume
+total_volume_df = stock_name_df.groupBy("stock_name").agg(
+    F.sum("dayVolume").alias("total_volume")
+)
+
+# 9. Write the analytics results to the console
+
+# Write Average Price
+avg_price_query = price_df.writeStream \
+    .outputMode("complete") \
     .format("console") \
+    .option("truncate", "false") \
     .start()
 
-query.awaitTermination()
+
+# Write Total Daily Volume
+total_volume_query = total_volume_df.writeStream \
+    .outputMode("complete") \
+    .format("console") \
+    .option("truncate", "false") \
+    .start()
+
+# Await Termination of All Queries
+avg_price_query.awaitTermination()
+total_volume_query.awaitTermination()

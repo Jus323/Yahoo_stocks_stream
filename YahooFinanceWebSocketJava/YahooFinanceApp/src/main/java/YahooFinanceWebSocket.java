@@ -42,9 +42,9 @@ public class YahooFinanceWebSocket {
                 @Override
                 public void onOpen(ServerHandshake handshake) {
                     System.out.println("Connected to Yahoo Finance WebSocket");
-                    String subscriptionMessage = "{\"subscribe\": [\"D05.SI\", \"Z74.SI\"]}";
+                    String subscriptionMessage = "{\"subscribe\": [\"D05.SI\", \"Z74.SI\", \"AWX.SI\"]}";
                     send(subscriptionMessage);
-                    System.out.println("Subscribed to symbols: D05.SI, Z74.SI");
+                    System.out.println("Subscribed to symbols: D05.SI, Z74.SI, AWX.SI");
                 }
 
                 @Override
@@ -54,10 +54,17 @@ public class YahooFinanceWebSocket {
                         TickerOuterClass.Ticker ticker = TickerOuterClass.Ticker.parseFrom(decodedBytes);
 
                         String key = ticker.getId();
-                        String value = String.format("{\"time\":%d,\"price\":%.2f}",
-                                ticker.getTime(), ticker.getPrice());
+                        String value = String.format(
+                                "{\"time\":%d,\"price\":%.2f,\"change\":%.2f,\"changePercentage\":%.2f,\"dayVolume\":%d}",
+                                ticker.getTime(),
+                                ticker.getPrice(),
+                                ticker.getChange(),
+                                ticker.getChangePercent(),
+                                ticker.getDayVolume()
+                        );
 
-                        System.out.println(ticker.getPrice());
+
+                        System.out.println(value);
 
                         ProducerRecord<String, String> record =
                                 new ProducerRecord<>(TOPIC, key, value);
