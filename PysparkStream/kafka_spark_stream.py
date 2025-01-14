@@ -63,12 +63,8 @@ price_df = stock_name_df.groupBy("stock_name").agg(
     F.max("price").alias("max_price"),
     F.last("price").alias("current_price")  # Fetches the most recent price for each stock
 )
-# b. Detect Significant Price Changes
-significant_change_df = stock_name_df.filter(col("change") > 1.0).select(
-    "stock_name", "price", "change", "changePercentage", "event_time"
-)
 
-# c. Calculate Total Daily Volume
+# b. Calculate Total Daily Volume
 total_volume_df = stock_name_df.groupBy("stock_name").agg(
     F.sum("dayVolume").alias("total_volume")
 )
